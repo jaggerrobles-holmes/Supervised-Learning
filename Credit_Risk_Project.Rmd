@@ -1,0 +1,280 @@
+---
+title: "Credit Risk Analysis"
+author: "Jagger Robles-Holmes"
+date: "2025-04-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, include=FALSE}
+library(tidyverse)    # Data manipulation & visualization
+library(caret)        # Machine learning
+library(randomForest) # Random Forest model
+library(ggplot2)      # Plotting
+library(ROCR)         # ROC curves
+library(corrplot)     # Collinearity
+```
+
+```{r}
+# Load data
+credit_data <- read.csv("C:/Users/jagge/Downloads/credit_risk_dataset.csv/credit_risk_dataset.csv")
+```
+
+```{r}
+# Check structure
+glimpse(credit_data)
+
+# Summary statistics
+summary(credit_data)
+
+# Check for missing values
+colSums(is.na(credit_data))
+```
+
+```{r}
+# Cap person_age at 80
+credit_data <- credit_data %>%
+  mutate(person_age = ifelse(person_age > 80, 80, person_age))
+```
+
+```{r}
+# Impute loan_int_rate with median
+credit_data$loan_int_rate[is.na(credit_data$loan_int_rate)] <- median(credit_data$loan_int_rate, na.rm = TRUE)
+
+# Impute person_emp_length with 0 (assuming missing = unemployed)
+credit_data$person_emp_length[is.na(credit_data$person_emp_length)] <- 0
+```
+
+```{r}
+credit_data <- credit_data %>%
+  mutate(
+    person_home_ownership = as.factor(person_home_ownership),
+    loan_intent = as.factor(loan_intent),
+    loan_grade = as.factor(loan_grade),
+    cb_person_default_on_file = as.factor(cb_person_default_on_file),
+    loan_status = as.factor(loan_status)
+  )
+```
+
+```{r}
+# Age distribution
+ggplot(credit_data, aes(x = person_age)) +
+  geom_histogram(binwidth = 5, fill = "blue", alpha = 0.7) +
+  labs(title = "Distribution of Applicant Age", x = "Age", y = "Count")
+
+# Income distribution (log scale for readability)
+ggplot(credit_data, aes(x = person_income)) +
+  geom_histogram(fill = "green", alpha = 0.7) +
+  scale_x_log10() +  # Log-transform due to skewness
+  labs(title = "Distribution of Income (Log Scale)", x = "Income", y = "Count")
+```
+
+```{r}
+# Loan status (target variable)
+ggplot(credit_data, aes(x = loan_status)) +
+  geom_bar(fill = c("green", "red")) +
+  labs(title = "Loan Default Status", x = "Status (0 = Paid, 1 = Default)", y = "Count")
+
+# Loan intent
+ggplot(credit_data, aes(x = loan_intent)) +
+  geom_bar(fill = "orange") +
+  coord_flip() +  # Horizontal bars for readability
+  labs(title = "Purpose of Loan", x = "Intent", y = "Count")
+```
+
+```{r}
+# Income vs. Default
+ggplot(credit_data, aes(x = loan_status, y = person_income)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  labs(title = "Income vs. Loan Default", x = "Default Status", y = "Income (Log)")
+
+# Loan amount vs. Default
+ggplot(credit_data, aes(x = loan_status, y = loan_amnt)) +
+  geom_boxplot() +
+  labs(title = "Loan Amount vs. Default", x = "Default Status", y = "Loan Amount")
+```
+
+```{r}
+# Default rate by home ownership
+credit_data %>%
+  group_by(person_home_ownership, loan_status) %>%
+  summarise(count = n()) %>%
+  mutate(percent = count / sum(count)) %>%
+  ggplot(aes(x = person_home_ownership, y = percent, fill = loan_status)) +
+  geom_col() +
+  labs(title = "Default Rate by Home Ownership", x = "Home Ownership", y = "Proportion")
+
+# Default rate by loan intent
+credit_data %>%
+  group_by(loan_intent, loan_status) %>%
+  summarise(count = n()) %>%
+  mutate(percent = count / sum(count)) %>%
+  ggplot(aes(x = loan_intent, y = percent, fill = loan_status)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Default Rate by Loan Purpose", x = "Purpose", y = "Proportion")
+```
+
+```{r}
+# Select numeric variables only
+numeric_data <- credit_data %>%
+  select(person_age, person_income, person_emp_length, loan_amnt, loan_int_rate, loan_percent_income, cb_person_cred_hist_length)
+
+# Compute correlation matrix
+cor_matrix <- cor(numeric_data, use = "complete.obs")  # Handles any remaining NAs
+
+# Plot correlations
+corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black")
+```
+
+```{r}
+# Separate test and train data
+set.seed(123)
+train_index <- createDataPartition(credit_data$loan_status, p = 0.75, list = FALSE)
+train_data <- credit_data[train_index, ]
+test_data <- credit_data[-train_index, ]
+```
+
+```{r}
+# log transformation reduces skewness
+train_data$log_age <- log(train_data$person_age + 1)  # +1 to avoid log(0)
+```
+
+```{r}
+# Easier for higher incomes to pay higher loans
+train_data$income_loan_ratio <- train_data$person_income / train_data$loan_amnt
+```
+
+```{r}
+# Highlights riskier categories
+train_data$high_risk_purpose <- ifelse(train_data$loan_intent %in% c("DEBTCONSOLIDATION", "MEDICAL", "HOMEMPROVEMENT"), 1, 0)
+```
+
+```{r}
+# Converts text to binary columns 
+dummies <- dummyVars(~ person_home_ownership + loan_intent + loan_grade, data = train_data)
+train_encoded <- predict(dummies, newdata = train_data) %>% as.data.frame()
+train_data <- cbind(train_data, train_encoded)
+```
+
+```{r}
+# Logistic is good for binary classification
+logit_model <- glm(
+  loan_status ~ person_age + person_income + loan_amnt + loan_int_rate + 
+                cb_person_cred_hist_length + high_risk_purpose + income_loan_ratio,
+  data = train_data,
+  family = "binomial"
+)
+
+# Summary to check coefficients
+summary(logit_model)
+```
+
+```{r}
+logit_model_simple <- glm(
+  loan_status ~ person_income + loan_amnt + loan_int_rate + high_risk_purpose,
+  family = "binomial",
+  data = train_data
+)
+
+# Check new summary
+summary(logit_model_simple)
+```
+
+```{r}
+# Create the same high_risk_purpose feature in test_data
+test_data$high_risk_purpose <- ifelse(
+  test_data$loan_intent %in% c("DEBTCONSOLIDATION", "MEDICAL", "HOMEMPROVEMENT"), 
+  1,  # High-risk
+  0   # Low-risk
+)
+
+# Predict probabilities on test data
+test_data$pred_prob <- predict(logit_model_simple, newdata = test_data, type = "response")
+head(test_data$pred_prob)  # Show first few predicted probabilities
+```
+
+```{r}
+# Convert probabilities to binary predictions (threshold = 0.5)
+test_data$pred_status <- ifelse(test_data$pred_prob > 0.5, 1, 0)
+
+# Generate confusion matrix
+conf_matrix <- confusionMatrix(as.factor(test_data$pred_status), as.factor(test_data$loan_status))
+print(conf_matrix)
+```
+
+```{r}
+pred <- prediction(test_data$pred_prob, test_data$loan_status)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf, colorize = TRUE, main = "ROC Curve")
+abline(a = 0, b = 1, lty = 2)
+
+# Calculate AUC
+auc_log <- performance(pred, "auc")@y.values[[1]]
+print(paste("AUC:", round(auc_log, 3)))
+```
+
+```{r}
+set.seed(123)
+
+# Trying random forest to handle imbalance between paid and default
+class_weights <- ifelse(train_data$loan_status == 1, 5, 1)  # 5x weight for defaults
+
+rf_model_balanced <- randomForest(
+  loan_status ~ person_age + person_income + loan_amnt + loan_intent + 
+                cb_person_default_on_file + income_loan_ratio,
+  data = train_data,
+  ntree = 200,
+  classwt = c("0" = 1, "1" = 5),  # Explicit class weights
+  importance = TRUE
+)
+```
+
+```{r}
+# Recreate income_loan_ratio in test_data
+test_data$income_loan_ratio <- test_data$person_income / test_data$loan_amnt
+
+# Predict probabilities
+test_data$rf_prob <- predict(rf_model_balanced, newdata = test_data, type = "prob")[, 2]
+
+# Convert to binary predictions (threshold = 0.5)
+test_data$rf_pred <- ifelse(test_data$rf_prob > 0.5, 1, 0)
+```
+
+```{r}
+conf_matrix_rf <- confusionMatrix(as.factor(test_data$rf_pred), 
+                                as.factor(test_data$loan_status))
+print(conf_matrix_rf)
+```
+
+```{r}
+pred_rf <- prediction(test_data$rf_prob, test_data$loan_status)
+perf_rf <- performance(pred_rf, "tpr", "fpr")
+
+plot(perf_rf, colorize=TRUE, main="ROC Curve - Balanced Random Forest")
+abline(a=0, b=1, lty=2)
+
+# Calculate AUC
+auc_rf <- performance(pred_rf, "auc")@y.values[[1]]
+print(paste("AUC:", round(auc_rf, 3)))
+```
+
+This project aimed to predict credit risk by analyzing loan applicant data to determine whether borrowers would default. Starting with a dataset of 32,581 loans, I performed exploratory data analysis to identify key trends: defaults were more common among renters, high-risk loan purposes (medical, debt consolidation), and applicants with higher loan amounts relative to income.
+
+I built and compared two supervised learning models in R:
+
+  1. Logistic Regression: Provided interpretable coefficients but struggled with class imbalance, catching         only 34% of defaults.
+
+  2. Balanced Random Forest: Improved default detection to 54.5% by weighting defaults more heavily, while         maintaining 83.5% accuracy and a stronger AUC.
+
+The final model demonstrates that income, loan amount, and interest rate are critical predictors of default. While the model trades off some false positives for better default detection, this is often preferable in banking—where missing risky loans is costlier than over-caution. Future improvements could include fine-tuning the decision threshold or engineering additional features such as debt-to-income ratios.
+
+This project highlights how machine learning can uncover actionable insights in financial risk, providing a foundation for real-world credit scoring systems. By methodically cleaning data, engineering features, and iterating on models, I transformed raw data into a predictive tool with measurable business value.
+
+
+
